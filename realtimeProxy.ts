@@ -152,9 +152,13 @@ wss.on('connection', async (client, req) => {
           throw new Error('REALTIME_TOKEN_SECRET não configurada');
         }
         
-        const payload = jwt.verify(msg.token, REALTIME_TOKEN_SECRET, {
-          issuer: 'pedi-pro-flow'
-        }) as jwt.JwtPayload;
+        const payload = jwt.verify(msg.token, REALTIME_TOKEN_SECRET) as jwt.JwtPayload;
+        
+        // Verificar issuer manualmente
+        if (payload.iss !== 'pedi-pro-flow') {
+          log.warn(connId, 'Token com issuer inválido', { issuer: payload.iss });
+          return closeAll(1008, 'invalid-issuer');
+        }
         
         // Verificar scope
         if (payload.scope !== 'realtime') {

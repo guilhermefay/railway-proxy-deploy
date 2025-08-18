@@ -15,12 +15,20 @@ const IDLE_TIMEOUT_MS = 60000;
 const MAX_JSON_BYTES = 512 * 1024;
 const MAX_BINARY_BYTES = 20 * 1024 * 1024;
 
-// Validação inicial
+// Log inicial para debug
+console.log('[RealtimeProxy] Iniciando servidor...');
+console.log('[RealtimeProxy] Variáveis de ambiente:', {
+  PORT: process.env.PORT,
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY ? '***configurada***' : 'NÃO CONFIGURADA',
+  REALTIME_TOKEN_SECRET: process.env.REALTIME_TOKEN_SECRET ? '***configurada***' : 'NÃO CONFIGURADA'
+});
+
+// Validação inicial (aviso em vez de erro)
 if (!OPENAI_API_KEY) {
-  throw new Error('OPENAI_API_KEY não configurada');
+  console.error('[RealtimeProxy] AVISO: OPENAI_API_KEY não configurada! O proxy não funcionará.');
 }
 if (!REALTIME_TOKEN_SECRET) {
-  throw new Error('REALTIME_TOKEN_SECRET não configurada');
+  console.error('[RealtimeProxy] AVISO: REALTIME_TOKEN_SECRET não configurada! A autenticação falhará.');
 }
 
 // --- Logging
@@ -133,6 +141,10 @@ wss.on('connection', async (client, req) => {
 
       // Validação do token JWT LOCAL
       try {
+        if (!REALTIME_TOKEN_SECRET) {
+          throw new Error('REALTIME_TOKEN_SECRET não configurada');
+        }
+        
         const payload = jwt.verify(msg.token, REALTIME_TOKEN_SECRET, {
           issuer: 'pedi-pro-flow'
         }) as jwt.JwtPayload;

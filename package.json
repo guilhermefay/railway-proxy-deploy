@@ -1,0 +1,13 @@
+{
+  "name": "pdc-realtime-proxy",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "tsx realtimeProxy.ts"
+  },
+  "dependencies": {
+    "ws": "^8.16.0",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.19.2"
+  }
+}

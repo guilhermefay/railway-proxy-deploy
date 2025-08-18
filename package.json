@@ -3,11 +3,14 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "tsx realtimeProxy.ts"
+    "start": "tsx realtimeProxy.ts",
+    "start:jwt": "tsx realtimeProxy-jwt.ts"
   },
   "dependencies": {
     "ws": "^8.16.0",
     "@types/ws": "^8.5.10",
-    "tsx": "^4.19.2"
+    "tsx": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "@types/jsonwebtoken": "^9.0.5"
   }
 }

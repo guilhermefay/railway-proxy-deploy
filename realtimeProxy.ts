@@ -139,6 +139,13 @@ wss.on('connection', async (client, req) => {
       }
       authUsedOnce = true;
 
+      // Debug do token recebido
+      log.info(connId, 'Token recebido:', {
+        tokenLength: msg.token.length,
+        tokenFormat: msg.token.substring(0, 20) + '...',
+        tokenParts: msg.token.split('.').length
+      });
+
       // Validação do token JWT LOCAL
       try {
         if (!REALTIME_TOKEN_SECRET) {

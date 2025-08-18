@@ -1,107 +1,40 @@
-#!/usr/bin/env node
-/**
- * Proxy WebSocket para OpenAI Realtime (hardened)
- * Execução: ts-node src/services/realtimeProxy.ts
- */
-
-import http from 'http';
-import { setTimeout as delay } from 'timers/promises';
 import WebSocket, { WebSocketServer } from 'ws';
+import http from 'http';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 
-type Json = Record<string, any>;
+// --- Configuração
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 8080;
+const MODEL = process.env.MODEL || 'gpt-4o-realtime-preview-2024-10-01';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const REALTIME_TOKEN_SECRET = process.env.REALTIME_TOKEN_SECRET || '';
 
-const MODEL = process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-10-01';
-const TOKEN_VALIDATION_URL = process.env.TOKEN_VALIDATION_URL || 'http://localhost:3000/api/openai-realtime-token';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const PORT = parseInt(process.env.PROXY_PORT || '8080', 10);
+// Timeouts e limites
+const AUTH_TIMEOUT_MS = 15000;
+const IDLE_TIMEOUT_MS = 60000;
+const MAX_JSON_BYTES = 512 * 1024;
+const MAX_BINARY_BYTES = 20 * 1024 * 1024;
 
-// Limites e timeouts
-const CLIENT_AUTH_TIMEOUT_MS = 30_000;
-const INACTIVITY_TIMEOUT_MS = 120_000;
-const TOKEN_FETCH_TIMEOUT_MS = 7_000;
-const MAX_JSON_BYTES = 256 * 1024;             // 256 KB por mensagem JSON
-const MAX_BINARY_BYTES = 512 * 1024;           // 512 KB por chunk binário
-const MAX_BUFFERED_BYTES = 2 * 1024 * 1024;    // 2 MB de backpressure
-
+// Validação inicial
 if (!OPENAI_API_KEY) {
-  console.error('[Proxy] FATAL: OPENAI_API_KEY não configurada');
-  process.exit(1);
+  throw new Error('OPENAI_API_KEY não configurada');
+}
+if (!REALTIME_TOKEN_SECRET) {
+  throw new Error('REALTIME_TOKEN_SECRET não configurada');
 }
 
-// --- Utils de log
-const now = () => new Date().toISOString();
+// --- Logging
 const log = {
-  info: (id: string, msg: string, extra?: Json) => console.log(JSON.stringify({ t: now(), lvl: 'info', id, msg, ...extra })),
-  warn: (id: string, msg: string, extra?: Json) => console.warn(JSON.stringify({ t: now(), lvl: 'warn', id, msg, ...extra })),
-  err:  (id: string, msg: string, extra?: Json) => console.error(JSON.stringify({ t: now(), lvl: 'error', id, msg, ...extra })),
-};
-
-// --- Whitelists
-const ALLOWED_CLIENT_TYPES = new Set<string>([
-  // principais eventos do Realtime
-  'auth',                          // só primeira msg
-  'session.update',
-  'response.create',
-  'response.cancel',
-  'input_audio_buffer.append',
-  'input_audio_buffer.commit',
-  'input_audio_buffer.clear',
-  'response.output_audio.delta',
-  'response.output_audio.done',
-  'input_image.append',            // se usar imagens
-  'conversation.item.create',
-  'conversation.item.truncate',
-  'conversation.item.delete',
-]);
-
-const ALLOWED_SESSION_FIELDS = new Set<string>([
-  'instructions',
-  'voice',
-  'input_audio_format',
-  'output_audio_format',
-  'input_audio_transcription',
-  'turn_detection',
-  'temperature',
-  'modalities',
-  // campos normalmente aceitos pelos endpoints Realtime
-  'max_response_output_tokens',
-  'tools',
-]);
-
-// --- Sanitização de session.update
-function isSafeSessionUpdate(msg: Json): boolean {
-  if (msg?.type !== 'session.update') return true;
-  const s = msg.session ?? {};
-  // impede chaves desconhecidas
-  const keys = Object.keys(s);
-  if (!keys.every(k => ALLOWED_SESSION_FIELDS.has(k))) return false;
-
-  // opcional: validações de formato básico
-  if (s.input_audio_transcription && typeof s.input_audio_transcription !== 'object') return false;
-  if (s.modalities && !Array.isArray(s.modalities)) return false;
-
-  return true;
-}
-
-// --- Checagens de tamanho
-function withinJsonSizeLimit(buf: Buffer) {
-  return buf.byteLength <= MAX_JSON_BYTES;
-}
-function withinBinarySizeLimit(buf: Buffer) {
-  return buf.byteLength <= MAX_BINARY_BYTES;
-}
-
-// --- Fetch com timeout
-async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Promise<Response> {
-  const ctrl = new AbortController();
-  const to = setTimeout(() => ctrl.abort(), ms);
-  try {
-    return await fetch(url, { ...init, signal: ctrl.signal });
-  } finally {
-    clearTimeout(to);
+  info: (connId: string, msg: string, extra?: any) => {
+    console.log(`[${connId}] ${msg}`, extra || '');
+  },
+  warn: (connId: string, msg: string, extra?: any) => {
+    console.warn(`[${connId}] ${msg}`, extra || '');
+  },
+  err: (connId: string, msg: string, extra?: any) => {
+    console.error(`[${connId}] ${msg}`, extra || '');
   }
-}
+};
 
 // --- Servidor
 const server = http.createServer((req, res) => {
@@ -112,7 +45,8 @@ const server = http.createServer((req, res) => {
       status: 'WebSocket Proxy Server Running',
       timestamp: new Date().toISOString(),
       model: MODEL,
-      port: PORT
+      port: PORT,
+      auth: 'JWT'
     }));
     return;
   }
@@ -124,7 +58,7 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({
   server,
-  perMessageDeflate: false, // já está off
+  perMessageDeflate: false,
   maxPayload: Math.max(MAX_JSON_BYTES, MAX_BINARY_BYTES),
 });
 
@@ -149,44 +83,40 @@ wss.on('connection', async (client, req) => {
   // Timeout de auth
   const authTimer = setTimeout(() => {
     if (!authed) {
-      log.warn(connId, 'Auth timeout');
+      log.warn(connId, 'Timeout de autenticação');
       closeAll(1008, 'auth-timeout');
     }
-  }, CLIENT_AUTH_TIMEOUT_MS);
+  }, AUTH_TIMEOUT_MS);
 
-  // Inatividade geral (ping/pong)
-  const inactivityInterval = setInterval(() => {
-    if (Date.now() - lastActivity > INACTIVITY_TIMEOUT_MS) {
-      log.warn(connId, 'Inatividade atingida');
-      return closeAll(1001, 'idle-timeout');
+  // Monitor de idle
+  const idleInterval = setInterval(() => {
+    if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+      log.warn(connId, 'Conexão idle');
+      closeAll(1001, 'idle-timeout');
     }
-    try {
-      if (client.readyState === WebSocket.OPEN) client.ping();
-      if (upstream?.readyState === WebSocket.OPEN) upstream.ping();
-    } catch (e) {
-      log.err(connId, 'Erro ping', { e: String(e) });
-    }
-  }, Math.floor(INACTIVITY_TIMEOUT_MS / 2));
+  }, 30000);
 
-  client.on('pong', () => { lastActivity = Date.now(); });
+  // Cleanup
+  const cleanup = () => {
+    clearTimeout(authTimer);
+    clearInterval(idleInterval);
+  };
 
   client.on('message', async (data, isBinary) => {
     lastActivity = Date.now();
-
-    // Se ainda não autenticado, a primeira msg deve ser auth
+    
+    // Primeira mensagem deve ser auth
     if (!authed) {
       if (isBinary) {
-        log.warn(connId, 'Binário antes de auth');
-        return closeAll(1008, 'auth-required');
-      }
-      // Limita tamanho para evitar DoS
-      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as any);
-      if (!withinJsonSizeLimit(buf)) {
-        log.warn(connId, 'JSON excede limite na auth');
-        return closeAll(1009, 'payload-too-large');
+        return closeAll(1003, 'expected-json-auth');
       }
 
-      let msg: Json;
+      const buf = data as Buffer;
+      if (buf.length > MAX_JSON_BYTES) {
+        return closeAll(1009, 'auth-msg-too-large');
+      }
+
+      let msg: any;
       try {
         msg = JSON.parse(buf.toString('utf8'));
       } catch {
@@ -201,26 +131,26 @@ wss.on('connection', async (client, req) => {
       }
       authUsedOnce = true;
 
-      // Validação do token via POST (sem vazar em query)
+      // Validação do token JWT LOCAL
       try {
-        const r = await fetchWithTimeout(
-          TOKEN_VALIDATION_URL,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: msg.token }),
-          },
-          TOKEN_FETCH_TIMEOUT_MS
-        );
-
-        const result = await r.json().catch(() => ({}));
-        if (!r.ok || result?.valid !== true) {
-          log.warn(connId, 'Token inválido', { status: r.status });
-          return closeAll(1008, 'invalid-token');
+        const payload = jwt.verify(msg.token, REALTIME_TOKEN_SECRET, {
+          issuer: 'pedi-pro-flow'
+        }) as jwt.JwtPayload;
+        
+        // Verificar scope
+        if (payload.scope !== 'realtime') {
+          log.warn(connId, 'Token com scope inválido', { scope: payload.scope });
+          return closeAll(1008, 'invalid-scope');
         }
-      } catch (e) {
-        log.err(connId, 'Falha ao validar token', { e: String(e) });
-        return closeAll(1011, 'token-validation-error');
+        
+        log.info(connId, 'Token JWT válido', { 
+          userId: payload.sub,
+          email: payload.email,
+          exp: new Date((payload.exp || 0) * 1000).toISOString()
+        });
+      } catch (err: any) {
+        log.warn(connId, 'Token JWT inválido', { error: err.message });
+        return closeAll(1008, 'invalid-token');
       }
 
       // Conecta ao Realtime OpenAI
@@ -231,7 +161,6 @@ wss.on('connection', async (client, req) => {
         headers: {
           'Authorization': `Bearer ${OPENAI_API_KEY}`,
           'OpenAI-Beta': 'realtime=v1',
-          // Cabeçalhos extras que às vezes ajudam na depuração
           'X-Proxy-Conn-Id': connId,
         },
       });
@@ -247,7 +176,7 @@ wss.on('connection', async (client, req) => {
 
       upstream.on('message', (d) => {
         if (client.readyState !== WebSocket.OPEN) return;
-        // Repasse direto (server->client). Aqui não aplicamos filtros.
+        // Repasse direto (server->client)
         client.send(d);
       });
 
@@ -269,90 +198,97 @@ wss.on('connection', async (client, req) => {
       return;
     }
 
-    // A partir daqui, autenticado: repassar client->upstream com filtros
+    // Mensagens após auth - filtros de segurança
     if (!upstream || upstream.readyState !== WebSocket.OPEN) {
-      log.warn(connId, 'Upstream não pronto');
+      log.warn(connId, 'Upstream não disponível');
       return;
     }
 
-    // Backpressure: se o buffer está alto, rejeita para não explodir memória
-    if (upstream.bufferedAmount > MAX_BUFFERED_BYTES) {
-      log.warn(connId, 'Backpressure alto (bufferedAmount)', { buffered: upstream.bufferedAmount });
-      return; // drop – ou poderia enfileirar e soltar depois
-    }
-
-    if (isBinary) {
-      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as any);
-      if (!withinBinarySizeLimit(buf)) {
-        log.warn(connId, 'Binário excede limite');
-        return closeAll(1009, 'payload-too-large');
+    // Aplicar filtros apenas em mensagens JSON
+    if (!isBinary) {
+      const buf = data as Buffer;
+      if (buf.length > MAX_JSON_BYTES) {
+        log.warn(connId, 'Mensagem JSON muito grande', { size: buf.length });
+        return;
       }
-      // Só envia binário após commit/append fluxos, então aqui repassamos
-      upstream.send(buf, { binary: true });
-      return;
+
+      try {
+        const msg = JSON.parse(buf.toString('utf8'));
+        
+        // Whitelist de tipos permitidos do cliente
+        const clientAllowedTypes = [
+          'input_audio_buffer.append',
+          'input_audio_buffer.commit',
+          'input_audio_buffer.clear',
+          'conversation.item.create',
+          'response.create',
+          'response.cancel',
+          'session.update',
+          'conversation.item.update',
+          'conversation.item.truncate',
+          'conversation.item.delete'
+        ];
+
+        if (!clientAllowedTypes.includes(msg.type)) {
+          log.warn(connId, 'Tipo de mensagem não permitido', { type: msg.type });
+          return;
+        }
+      } catch {
+        // Se não for JSON válido, bloqueia
+        log.warn(connId, 'Mensagem não-JSON do cliente');
+        return;
+      }
+    } else {
+      // Mensagens binárias - verificar tamanho
+      if (data.length > MAX_BINARY_BYTES) {
+        log.warn(connId, 'Mensagem binária muito grande', { size: data.length });
+        return;
+      }
     }
 
-    // JSON
-    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as any);
-    if (!withinJsonSizeLimit(buf)) {
-      log.warn(connId, 'JSON excede limite');
-      return closeAll(1009, 'payload-too-large');
-    }
-
-    let msg: Json;
-    try {
-      msg = JSON.parse(buf.toString('utf8'));
-    } catch {
-      return closeAll(1003, 'invalid-json');
-    }
-
-    // Whitelist de tipos
-    if (!ALLOWED_CLIENT_TYPES.has(msg?.type)) {
-      log.warn(connId, 'Tipo de mensagem não permitido', { type: msg?.type });
-      return;
-    }
-
-    // Sanitização de session.update
-    if (!isSafeSessionUpdate(msg)) {
-      log.warn(connId, 'session.update bloqueado (campos inválidos)');
-      return;
-    }
-
-    // Tudo certo, repassa
-    upstream.send(JSON.stringify(msg));
+    // Repasse para upstream
+    upstream.send(data);
   });
+
+  client.on('pong', () => { lastActivity = Date.now(); });
 
   client.on('close', (code, reason) => {
     log.info(connId, 'Cliente fechou', { code, reason: reason?.toString() });
-    clearTimeout(authTimer);
-    clearInterval(inactivityInterval);
-    closeAll();
+    closeAll(code, reason?.toString());
+    cleanup();
   });
 
   client.on('error', (e) => {
-    log.err(connId, 'Erro cliente', { e: String(e) });
-    clearTimeout(authTimer);
-    clearInterval(inactivityInterval);
-    closeAll();
+    log.err(connId, 'Erro no cliente', { e: String(e) });
+    closeAll(1011, 'client-error');
+    cleanup();
   });
+
+  // Ping periódico
+  const pingInterval = setInterval(() => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.ping();
+    }
+  }, 30000);
+
+  client.on('close', () => clearInterval(pingInterval));
 });
 
-// Startup
-server.listen(PORT, () => {
+// Start server
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`[RealtimeProxy] ws://localhost:${PORT}`);
   console.log(`[RealtimeProxy] Model: ${MODEL}`);
-  console.log(`[RealtimeProxy] Token validation: ${TOKEN_VALIDATION_URL} (POST)`);
+  console.log(`[RealtimeProxy] Auth: JWT (local validation)`);
+  console.log(`[RealtimeProxy] Token secret: ${REALTIME_TOKEN_SECRET ? 'Configured' : 'MISSING!'}`);
 });
 
 // Graceful shutdown
-for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(sig, async () => {
-    console.log(`[RealtimeProxy] Encerrando (${sig})…`);
-    try {
-      await new Promise<void>((res) => wss.close(() => res()));
-      await new Promise<void>((res) => server.close(() => res()));
-    } finally {
+process.on('SIGTERM', () => {
+  console.log('[RealtimeProxy] SIGTERM recebido, fechando...');
+  wss.close(() => {
+    server.close(() => {
+      console.log('[RealtimeProxy] Servidor fechado');
       process.exit(0);
-    }
+    });
   });
-}
+});

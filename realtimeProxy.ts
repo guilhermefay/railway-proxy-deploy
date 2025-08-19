@@ -205,6 +205,10 @@ wss.on('connection', async (client, req) => {
           const msg = JSON.parse(d.toString());
           if (['session.created', 'session.updated', 'error'].includes(msg.type)) {
             log.info(connId, `OpenAI -> Cliente: ${msg.type}`);
+            // Log detalhado de erros
+            if (msg.type === 'error') {
+              log.err(connId, 'Erro do OpenAI:', msg);
+            }
           }
         } catch (e) {
           // É binário, ignora
@@ -280,6 +284,16 @@ wss.on('connection', async (client, req) => {
       }
     }
 
+    // Log de mensagens do cliente para debug
+    if (!isBinary) {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === 'session.update') {
+          log.info(connId, 'Cliente -> OpenAI: session.update', msg);
+        }
+      } catch {}
+    }
+    
     // Repasse para upstream
     upstream.send(data);
   });

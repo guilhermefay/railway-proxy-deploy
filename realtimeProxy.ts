@@ -16,9 +16,11 @@ const MAX_JSON_BYTES = 512 * 1024;
 const MAX_BINARY_BYTES = 20 * 1024 * 1024;
 
 // Log inicial para debug
-console.log('[RealtimeProxy] Iniciando servidor...');
+console.log('[RealtimeProxy] Iniciando servidor... v2.0');
+console.log('[RealtimeProxy] Modelo configurado:', MODEL);
 console.log('[RealtimeProxy] Variáveis de ambiente:', {
   PORT: process.env.PORT,
+  MODEL: process.env.MODEL || 'DEFAULT: gpt-4o-realtime-preview',
   OPENAI_API_KEY: process.env.OPENAI_API_KEY ? '***configurada***' : 'NÃO CONFIGURADA',
   REALTIME_TOKEN_SECRET: process.env.REALTIME_TOKEN_SECRET ? '***configurada***' : 'NÃO CONFIGURADA'
 });

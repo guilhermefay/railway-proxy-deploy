@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 
 // --- Configuração
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 8080;
-const MODEL = process.env.MODEL || 'gpt-4o-realtime-preview-2024-10-01';
+const MODEL = process.env.MODEL || 'gpt-4o-realtime-preview';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const REALTIME_TOKEN_SECRET = process.env.REALTIME_TOKEN_SECRET || '';
 

@@ -199,6 +199,17 @@ wss.on('connection', async (client, req) => {
 
       upstream.on('message', (d) => {
         if (client.readyState !== WebSocket.OPEN) return;
+        
+        // Log mensagens importantes do OpenAI
+        try {
+          const msg = JSON.parse(d.toString());
+          if (['session.created', 'session.updated', 'error'].includes(msg.type)) {
+            log.info(connId, `OpenAI -> Cliente: ${msg.type}`);
+          }
+        } catch (e) {
+          // É binário, ignora
+        }
+        
         // Repasse direto (server->client)
         client.send(d);
       });
